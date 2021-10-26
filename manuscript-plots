@@ -1,0 +1,1460 @@
+---
+title: "IL COVID Disparities Manuscript Plots"
+author: "Tobias Holden"
+date: "08/25/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=T}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+
+library(ggplot2)
+library(dplyr)
+library(reshape)
+library(tmap)
+library(tmaptools)
+library(knitr)
+library(stringr)
+library(sf)
+library(ggthemes)
+library(tidyverse)
+library(tcltk)
+library(viridis)
+theme_set(theme_tufte(base_size = 18))
+# Palette for Race/Ethnicity
+wespal <- c('#913058', "#F6851F", "#00A08A", "#D61B5A", "#5393C3", "#F1A31F", "#98B548", "#8971B3", "#969696")
+
+```
+
+```{r}
+### Configuration ###
+#####################
+
+# Date cut-off for data inclusion
+pull_date <- as.Date("2021-02-10",format="%Y-%m-%d")
+# Start-Date cut-off for plotting
+start_date <- as.Date("2020-03-01",format="%Y-%m-%d")
+# End-Date cut-off for plotting
+cutoff_date <- as.Date("2020-12-31",format="%Y-%m-%d")
+
+# Tag for saved outputs (extract_cutoff_)
+tag <- paste(pull_date,"_",cutoff_date,"_sens1",sep="") # sens refers to ethnicity assignment scenario
+# Filetype for images (.png or .pdf)
+extension <- ".pdf"
+
+# Select Save Location
+gwd <- tk_choose.dir(caption="Select Output Folder")
+setwd(gwd)
+# Load Linelist Data
+ll <- read.csv(tk_choose.files(caption = "Select Line List Data"))
+```
+
+### Data Cleaning - Linelist
+
+```{r}
+# Multiracial patients are entered as multiple rows... 
+# Add column of multiple_races to label these
+
+ids <- data.frame(table(ll$id))
+ll$multiple_races <- ll$id %in% ids$Var1[which(ids$Freq>1)]
+ll$race[which(ll$multiple_races==T)] <- "Multiple"
+
+#Reduce dataset to count multiples only once
+cases <- ll[!duplicated(ll$id),]
+
+
+### Race
+
+cases$race_label <- paste(cases$race)
+cases$race_label[cases$race_label==""] <- "Unknown"
+
+# Group NHPI & AIAN --> "Native"
+cases$race_label[cases$race_label=="Native Hawaiian or Other Pacific Islander"] <- "Native" 
+cases$race_label[cases$race_label=="American Indian or Alaskan Native"] <- "Native"
+
+# Assign cases that had multiple races selected to "Other"
+cases$race_label[cases$race_label=="Multiple"] <- "Other"
+
+# Shorten Labels
+cases$race_label[cases$race_label=="Black or African American"] <- "Black"
+
+
+### Ethnicity ###
+
+# Hispanic-Latino ethnicity encoded separately
+cases$ethnicity <- paste(cases$ethnicity)
+# Scenario #1: Cases with Unknown ethnicity --> Non-Hispanic
+cases$ethnicity[which(cases$ethnicity=="")] <- "Unknown"
+cases$ethnicity[which(cases$ethnicity=="Missing")] <- "Unknown"
+cases$ethnicity[which(cases$ethnicity=="Unknown Not Classified")] <- "Unknown"
+cases$ethnicity[which(cases$ethnicity=="Not Hispanic or not Latino")] <- "Not Hispanic or Latino"
+
+cases$race_eth <- cases$race_label
+cases$race_eth[which(cases$ethnicity=="Hispanic or Latino")] <- "Hispanic-Latino"
+
+table(cases$race_eth,useNA = 'ifany')
+cases$race_eth <- factor(cases$race_eth, levels=c("White","Hispanic-Latino","Black","Asian","Native","Other","Unknown"))
+
+# Scenario #2: Cases with Unknown ethnicity --> Unknown Race (discounted)
+cases$ethnicity2 <- cases$ethnicity
+
+cases$race_eth2 <- cases$race_label
+cases$race_eth2[which(cases$ethnicity2=="Hispanic or Latino")] <- "Hispanic-Latino"
+cases$race_eth2[which(cases$ethnicity2=="Unknown")] <- "Unknown"
+
+table(cases$race_eth2,useNA = 'ifany')
+cases$race_eth2 <- factor(cases$race_eth2, levels=c("White","Hispanic-Latino","Black","Asian","Native","Other","Unknown"))
+
+# Scenario #2: Cases with Unknown ethnicity --> Hispanic (extreme)
+cases$ethnicity3 <- cases$ethnicity
+
+cases$race_eth3 <- cases$race_label
+cases$race_eth3[which(cases$ethnicity3 %in% c("Unknown","Hispanic or Latino"))] <- "Hispanic-Latino"
+
+table(cases$race_eth3,useNA = 'ifany')
+cases$race_eth3 <- factor(cases$race_eth3, levels=c("White","Hispanic-Latino","Black","Asian","Native","Other","Unknown"))
+
+### Uncomment line to change ethnicity assignment scenario (default = #1)
+
+#cases$race_eth <- cases$race_eth2
+#cases$race_eth <- cases$race_eth3
+
+
+### Age ###
+###########
+
+cases$age_group[cases$age_group == "#N/A"] <- ""
+cases$age_group[cases$age_group==""] <- NA
+
+### Test Date ###
+#################
+cases$specimen_collection <- as.Date(cases$specimen_collection, format = "%Y-%m-%d")
+
+# "tested" = Restricted dataset: only rows with valid test dates
+
+futures <- which(cases$specimen_collection > cutoff_date)
+if(length(futures)>0) {cases$specimen_collection[futures] <- NA}
+pasts <- which(cases$specimen_collection < start_date)
+if(length(pasts)>0) {cases$specimen_collection[pasts] <- NA}
+
+tested <- subset(cases, !is.na(specimen_collection))
+
+# Assign tested cases to 'waves' or 'intervals' based on test date
+tested$wave <-NA
+tested$wave[tested$specimen_collection < "2020-06-01"] <- "Window 1"
+tested$wave[tested$specimen_collection >= "2020-06-01" & tested$specimen_collection < "2020-10-01"] <- "Window 2"
+tested$wave[tested$specimen_collection >= "2020-10-01" & tested$specimen_collection < "2021-01-01"] <- "Window 3"
+tested$wave[tested$specimen_collection >= "2021-01-01" & tested$specimen_collection < "2021-03-01"] <- "Window 4"
+tested$wave[tested$specimen_collection >= "2021-03-01" & tested$specimen_collection < "2021-05-01"] <- "Window 5"
+tested$wave[tested$specimen_collection >= "2021-05-01" & tested$specimen_collection < "2021-07-01"] <- "Window 6"
+tested$wave[tested$specimen_collection >= "2021-07-01" & tested$specimen_collection < "2021-09-01"] <- "Window 7"
+
+tested$wave[tested$specimen_collection >= "2021-09-01" & tested$specimen_collection < "2021-11-01"] <- "Window 8"
+
+### Hospital Admissions ###
+###########################
+
+tested$admission_date <- as.Date(tested$admission_date,format="%Y-%m-%d")
+
+futures <- which(tested$admission_date > pull_date)
+if(length(futures)>0) {tested$admission_date[futures] <- NA}
+pasts <- which(tested$admission_date < start_date)
+if(length(pasts)>0) {tested$admission_date[pasts] <- NA}
+
+# Subset 'admitted' based on logical AND valid date of admission
+admitted <- subset(tested, tested$admitted_to_hospital=="Yes" & !(is.na(tested$admission_date)))
+
+# Subset 'admitted_all' based on logical OR valid date of admission
+admitted_all <- subset(tested, tested$admitted_to_hospital == "Yes" | !(is.na(tested$admission_date)))
+not_admitted <- subset(tested, !(tested$id %in% admitted_all$id))
+
+admitted$admission_date <- as.Date(admitted$admission_date,format="%Y-%m-%d")
+
+
+### Confirmed Deaths ###
+########################
+
+tested$deceased_date <- as.Date(tested$deceased_date,format="%Y-%m-%d")
+
+# Clean invalid death dates outside of range
+futures <- which(tested$deceased_date > pull_date)
+if(length(futures)>0) {tested$deceased_date[futures] <- NA}
+pasts <- which(tested$deceased_date < start_date)
+if(length(pasts)>0) {tested$deceased_date[pasts] <- NA}
+
+# Subset 'deceased' with "died_from_disease" = YES
+deceased <- subset(tested, tested$died_from_disease=="Yes")
+```
+
+## Reference Population Data
+
+```{r}
+## Eventual groupings
+race_key <- c("White","Black","Native","Asian","Native","Other", "Hispanic-Latino")
+age_key <- c("Under 21", "21-30","31-40","41-50","51-60","61-70","71-80","Over 80")
+
+### Load Population demographics data
+US_age_race <- read.csv(tk_choose.files(caption="Select census data"),stringsAsFactors = FALSE)
+# Restrict to Illinois
+IL_age_race <- subset(US_age_race,NAME == "Illinois")
+# Grab relevant columns
+IL_age_race <- IL_age_race[,c("SEX","ORIGIN","RACE","AGE","POPESTIMATE2019")]
+
+# Subset to rows with TOTAL values (not by Sex)
+IL_age_race <- subset(IL_age_race, IL_age_race$SEX == 0) # use TOTAL 
+
+colnames(IL_age_race) <- c("SEX","ORIGIN","RACE","AGE","POPESTIMATE2019")
+
+## Handling Ethnicity ##
+########################
+
+# Subset rows with Latino ethnicity flag
+latino <- subset(IL_age_race, IL_age_race$ORIGIN==2)
+# Subset rows with non-latino ethnicity flag
+non_latino <- subset(IL_age_race, IL_age_race$ORIGIN==1)
+
+non_latino$race_eth <- race_key[non_latino$RACE] # For non-hispanic, keep race
+latino$race_eth<- "Hispanic-Latino" # For hispanic, assign new race
+#table(race_eth,useNA = 'ifany')
+
+# Recombine data
+IL_age_race <- rbind.data.frame(non_latino,latino) 
+
+# Match Linelist age groups
+IL_age_race$age_group <- age_key[ifelse(IL_age_race$AGE<21,1,trunc((IL_age_race$AGE-11)/10)+1)]
+
+```
+
+
+## Figure 1
+```{r}
+
+#### Figure 1A
+#### Barplot of Population & COVID-19 Outcomes by Race/Ethnicity
+
+# Total population by Race/Ethnicity
+rp <- aggregate(IL_age_race$POPESTIMATE2019,by=list(IL_age_race$race_eth),FUN=sum)
+colnames(rp) <- c("race","population")
+# Total cases by Race/Ethnicity
+rc <- data.frame(table(tested$race_eth))
+colnames(rc) <- c("race","cases")
+# Total cases by Race/Ethnicity (for excl. unknown)
+rceu <- data.frame(table(tested$race_eth[tested$race_eth!="Unknown"]))
+colnames(rceu) <- c("race","cases_with_race")
+# Total admissions by Race/Ethnicity (for excl. unknown)
+ra <- data.frame(table(admitted_all$race_eth))
+colnames(ra) <- c("race","admissions")
+# Total deaths by Race/Ethnicity (for excl. unknown)
+rd <- data.frame(table(deceased$race_eth))
+colnames(rd) <- c("race","deaths")
+
+# Merge data by race
+r.all <- merge(rp,rc,by = "race",all=T)
+r.all <- merge(r.all,rceu,by="race")
+r.all <- merge(r.all,ra,by="race")
+r.all <- merge(r.all,rd,by="race")
+
+# Melt for plotting
+r.melt <- melt(r.all,id.vars = "race")
+r.melt$race <- factor(r.melt$race, levels=c("White","Hispanic-Latino","Black","Asian","Native","Other","Unknown"))
+
+## Plot
+ggplot(r.melt, aes(x=variable,y=value,fill=race)) +
+  geom_bar(stat="identity",position="fill") +
+  scale_fill_manual(values=wespal[c(1:5,7,9)]) +
+  theme(legend.position = "bottom") + 
+  labs(fill="") + xlab("") + ylab("") + 
+  scale_y_continuous(labels=scales::percent)
+# Save
+ggsave(paste(gwd,"/",tag,"Barplot_Cumulative-Racial-Distribution.pdf",sep=""),useDingbats=FALSE)
+
+#### Figure 1B
+#### Population & COVID-19 Outcomes by Age
+
+# Total population by Age
+ap <- aggregate(IL_age_race$POPESTIMATE2019,by=list(IL_age_race$age_group),FUN=sum)
+colnames(ap) <- c("age","population")
+# Total cases by Age
+ac <- data.frame(table(tested$age_group))
+colnames(ac) <- c("age","cases")
+# Total admissions by Age
+aa <- data.frame(table(admitted_all$age_group))
+colnames(aa) <- c("age","admissions")
+# Total deaths by Age
+ad <- data.frame(table(deceased$age_group))
+colnames(ad) <- c("age","deaths")
+
+# Merge outcomes by age
+a.all <- merge(ap,ac,by = "age",all=T)
+a.all <- merge(a.all,aa,by="age")
+a.all <- merge(a.all,ad,by="age")
+
+# Melt for plotting
+a.melt <- melt(a.all,id.vars = "age")
+a.melt$age <- factor(a.melt$age, levels=c("Under 21","21-30","31-40","41-50","51-60","61-70","71-80","Over 80")[8:1])
+
+install.packages("viridis")
+library(viridis)
+
+## Plot
+ggplot(a.melt[!is.na(a.melt$age),], aes(x=variable,y=value,fill=age)) +
+  geom_bar(stat="identity",position="fill") +
+  scale_y_continuous(labels=scales::percent) +
+  scale_fill_viridis(option = "mako", discrete = T) +
+  theme(legend.position = "bottom") + 
+  labs(fill="") + xlab("") + ylab("")
+# Save
+ggsave(paste(gwd,"/",tag,"Barplot_Cumulative-Age-Distribution_Mako.pdf",sep=""),useDingbats=FALSE)
+```
+
+
+
+## Figure 2
+
+```{r}
+#### Figure 2A
+#### Rolling Daily Outcomes vs. Time (with CLI overlay)
+
+# Load latest CLI admissions (this may need to be updated or done manually)
+CLI.admissions <- read.csv(tk_choose.files(caption="Select CLI Admissions Data"),stringsAsFactors = FALSE)
+
+# Calculate rolling daily CLI admissions (7-day lag)
+CLI.by.date <-  aggregate(CLI.admissions$inpatient,by=list(CLI.admissions$date), FUN=sum)
+colnames(CLI.by.date) <- c("date","n")
+CLI.by.date$date <- paste(CLI.by.date$date)
+CLI.by.date$date <- as.Date(CLI.by.date$date,format="%Y-%m-%d")
+
+CLI.by.date <- subset(CLI.by.date,!(is.na(CLI.by.date$date)))
+CLI.by.date$rolling <- NA
+for(i in 1:nrow(CLI.by.date))
+{
+   d <- CLI.by.date$date[i]
+   nub <- subset(CLI.by.date,CLI.by.date$date %in% seq.Date(d-6,d,1))
+   
+   CLI.by.date$rolling[i] <- mean(nub$n,na.rm=T)
+   
+}
+
+CLI.by.date$source <- "CLI"
+
+## Calculate rolling averages for other outcomes (7-day lag)
+dates <- c()
+rcs <- c()
+ras <- c()
+rds <- c()
+
+# Cases by specimen_collection date
+ct <- data.frame(table(tested$specimen_collection))
+colnames(ct) <- c("date","cases")
+# Admissions by specimen admission_date
+at <- data.frame(table(admitted$admission_date))
+colnames(at) <- c("date","admissions")
+# Deaths by specimen deceased_date
+dt <- data.frame(table(deceased$deceased_date))
+colnames(dt) <- c("date","deaths")
+
+t.merg <- merge(ct,at,by="date")
+t.merg <- merge(t.merg,dt,by="date")
+t.merg$date <- as.Date(paste(t.merg$date),format="%Y-%m-%d")
+
+for(d in paste(seq.Date(start_date,cutoff_date,1)))
+{
+  dates <- c(dates,d)
+  d <- as.Date(d,format="%Y-%m-%d")
+  hub <- subset(t.merg,t.merg$date %in% seq.Date(d-6,d,1))
+  
+  rcs <- c(rcs,mean(hub$cases,na.rm=T))
+  ras <- c(ras,mean(hub$admissions,na.rm=T))
+  rds <- c(rds,mean(hub$deaths,na.rm=T))
+  
+}
+
+# Join smoothed data
+smooth <- data.frame(dates,rcs,ras,rds)
+colnames(smooth) <- c("dates","cases","admissions","deaths")
+smooth$dates <- as.Date(paste(smooth$dates),format="%Y-%m-%d")
+
+# Melt for plotting
+smooth.melt <- melt(smooth,id.vars="dates")
+smooth.melt$source <- "LL"
+
+# CLI overlay
+CLI.by.date$variable <- "admissions"
+CLI.by.date <- CLI.by.date[,c("date","variable","rolling","source")]
+colnames(CLI.by.date) <- c("dates","variable","value","source")
+
+CLI.by.date <- subset(CLI.by.date, CLI.by.date$dates >= start_date & CLI.by.date$dates <= cutoff_date)
+
+# Join with CLI
+smooth.melt <- rbind(smooth.melt,CLI.by.date)
+
+g <- ggplot(smooth.melt, aes(x=dates,y=value,alpha=source)) + 
+  geom_density(stat="identity",aes(fill=source,color=source)) +
+  facet_wrap(~variable,ncol=3,scales="free_y") +
+  scale_fill_manual(values=c("blue","gray")) +
+  scale_color_manual(values=c("blue","black")) +
+  scale_alpha_manual(values = c(0.5,1))+
+  guides(alpha=F,color=F) +
+  labs(fill=" ",color="") + 
+  ylab("") + xlab("") + 
+  scale_x_date(date_breaks="2 months",date_label="%b")
+g
+
+ggsave(paste(gwd, "/", tag, "Rolling Average Outcomes.pdf", sep=""), width=20,height=10,useDingbats=F)
+
+
+#### Figure 2B
+#### Racial Distribution of Outcomes vs. Time
+
+# Lump into weekly windows
+tested$week<- NA
+admitted$week <- NA
+deceased$week <- NA
+
+marker <- as.Date("2020-01-01")
+
+# Weekly Windows
+
+difference <- tested$specimen_collection- marker
+tested$week <- trunc(difference/7) + 1
+difference <- admitted$admission_date- marker
+admitted$week <- trunc(difference/7) + 1
+difference <- deceased$deceased_date- marker
+deceased$week <- trunc(difference/7) + 1
+
+xc <- data.frame(table(tested$race_eth,tested$week))
+colnames(xc) <- c("race","week","cases")
+xa <- data.frame(table(admitted$race_eth, admitted$week))
+colnames(xa) <- c("race","week","admissions")
+xd <- data.frame(table(deceased$race_eth,deceased$week))
+colnames(xd) <- c("race","week","deaths")
+
+x.all <- merge(xc,xa,by=c("race","week"))
+x.all <- merge(x.all,xd,by=c("race","week"))
+
+x.melt <- melt(x.all,id.vars=c("race","week"))
+x.melt$week <- as.integer(paste(x.melt$week))
+
+ggplot(x.melt, aes(x=as.Date((week-1)*7+marker),y=value,fill=race)) +
+  geom_area(stat="identity", position="fill") +
+  facet_wrap(~variable, nrow=1) +
+  scale_fill_manual(values=wespal[c(1:5,7,9)]) + 
+  labs(fill="") + xlab("") + ylab("") + 
+  theme(legend.position="bottom") +
+  scale_x_date(date_breaks="2 months", date_labels="%b '%y") +
+  scale_y_continuous(labels=scales::percent)
+
+ggsave(paste(gwd,"/",tag,"AreaPlot_Outcomes-by-Race.pdf",sep=""),useDingbats=FALSE, width=20,height=10)
+
+```
+
+## Figure 4
+```{r}
+
+#### Figure 4A
+#### Disparities in Cases per Capita
+
+## Add New Age Groups for Deaths (lump Under 41 together)
+
+# In Line List
+tested$age_group2 <- paste(tested$age_group)
+tested$age_group2[which(tested$age_group %in% c("Under 21","21-30","31-40"))] <- "Under 41"
+tested$age_group2 <- factor(tested$age_group2,levels=c("Under 41","41-50","51-60","61-70","71-80","Over 80"))
+# In Population data
+IL_age_race$age_group2 <- IL_age_race$age_group
+IL_age_race$age_group2[which(IL_age_race$age_group %in% c("Under 21","21-30","31-40"))] <- "Under 41"
+
+
+# Finer age bins for testing (break up U21)
+age_key3 <- c("Under 10","11-17","18-22","23-30","31-40","41-50","51-60","61-70","71-80","Over 80")
+
+IL_age_race$age_group3 <- age_key3[ifelse(IL_age_race$AGE<11,1,ifelse(IL_age_race$AGE<18,2,ifelse(IL_age_race$AGE<23,3,trunc((IL_age_race$AGE-1)/10)+2)))]
+#table(IL_age_race$AGE,IL_age_race$age_group3)
+
+
+# cases by age/race
+wart <- tested %>% group_by(wave,race_eth,age_group) %>% tally()
+colnames(wart) <- c("wave","race","age","cases")
+# deaths by age/race
+deceased <- subset(tested,tested$died_from_disease=="Yes")
+ward <- deceased %>% group_by(wave,race_eth,age_group2) %>% tally()
+colnames(ward) <- c("wave","race","age","deaths")
+# merge
+warp <- merge(wart,ward,by=c("wave","race","age"),all=T)
+
+## Get subgroup population totals
+# For LL age groups
+AGP <- aggregate(IL_age_race$POPESTIMATE2019,by=list(IL_age_race$age_group,IL_age_race$race_eth),FUN=sum)
+colnames(AGP) <- c("age","race","population")
+# For Testing age groups
+AGP2 <- aggregate(IL_age_race$POPESTIMATE2019,by=list(IL_age_race$age_group2,IL_age_race$race_eth),FUN=sum)
+colnames(AGP2) <- c("age","race","population2")
+
+# merge with case/death counts
+warp <- merge(warp,AGP,by=c("race","age"),all=T)
+warp <- merge(warp,AGP2,by=c("race","age"),all=T)
+
+# Per capita rates
+warp$case.rate <- warp$cases/warp$population
+warp$death.rate <- warp$deaths/warp$population2
+warp$cfr <- warp$deaths/warp$cases
+
+# Function to determine SE of point estimates
+se_of_prop <- function(p,n){
+  se <- sqrt(p*(1-p)/n)
+  return(se)
+}
+
+warp$case.rate.se <- se_of_prop(warp$case.rate,warp$population)
+warp$death.rate.se <- se_of_prop(warp$death.rate,warp$population)
+warp$cfr.se <- se_of_prop(warp$cfr,warp$cases)
+
+warp$RR.case <- NA
+warp$RR.death <- NA
+warp$RR.cfr <- NA
+
+warp <- subset(warp, warp$race %in% c("Black", "White", "Hispanic-Latino"))
+#warp <- subset(warp, warp$wave != "Window 7")
+
+for(wa in unique(warp$wave))
+{
+  for(ra in unique(warp$race))
+  {
+    for(ag in unique(warp$age[!is.na(warp$age)]))
+    {
+      ind.row <- which(warp$age==ag & warp$race== ra & warp$wave == wa)
+      ref.row <- which(warp$age==ag & warp$race=="White" & warp$wave == wa)
+      
+      a <- warp$cases[ind.row]
+      if(is.na(a)){a <- 0}
+      b <- warp$population[ind.row]-warp$cases[ind.row]
+      c <- warp$cases[ref.row]
+      d <- warp$population[ref.row]-warp$cases[ref.row]
+      
+      warp$RR.case[ind.row] <- (a/(a+b))/(c/(c+d))
+      warp$RR.case.se.lnRR[ind.row] <- sqrt(1/a + 1/b - 1/(a+b) - 1/(c+d))
+      warp$RR.case.95CI.lower[ind.row] <- exp(log(warp$RR.case[ind.row])-1.96* warp$RR.case.se.lnRR[ind.row])
+      warp$RR.case.95CI.upper[ind.row] <- exp(log(warp$RR.case[ind.row])+1.96* warp$RR.case.se.lnRR[ind.row])
+      
+      a <- warp$deaths[ind.row]
+      if(is.na(a)){a <- 0}
+      b <- warp$population2[ind.row]-warp$deaths[ind.row]
+      c <- warp$deaths[ref.row]
+      d <- warp$population2[ref.row]-warp$deaths[ref.row]
+      
+      warp$RR.death[ind.row] <- (a/(a+b))/(c/(c+d))
+      warp$RR.death.se.lnRR[ind.row] <- sqrt(1/a + 1/b - 1/(a+b) - 1/(c+d))
+      warp$RR.death.95CI.lower[ind.row] <- exp(log(warp$RR.death[ind.row])-1.96* warp$RR.death.se.lnRR[ind.row])
+      warp$RR.death.95CI.upper[ind.row] <- exp(log(warp$RR.death[ind.row])+1.96* warp$RR.death.se.lnRR[ind.row])
+      
+      a <- warp$deaths[ind.row]
+      if(is.na(a)){a <- 0}
+      b <- warp$cases[ind.row]-warp$deaths[ind.row]
+      c <- warp$deaths[ref.row]
+      d <- warp$cases[ref.row]-warp$deaths[ref.row]
+      
+      warp$RR.cfr[ind.row] <- (a/(a+b))/(c/(c+d))
+      warp$RR.cfr.se.lnRR[ind.row] <- sqrt(1/a + 1/b - 1/(a+b) - 1/(c+d))
+      warp$RR.cfr.95CI.lower[ind.row] <- exp(log(warp$RR.cfr[ind.row])-1.96* warp$RR.cfr.se.lnRR[ind.row])
+      warp$RR.cfr.95CI.upper[ind.row] <- exp(log(warp$RR.cfr[ind.row])+1.96* warp$RR.cfr.se.lnRR[ind.row])
+      
+      
+    }
+  }
+}
+
+warp$age1 <- paste(warp$age)
+warp$age1[warp$age=="Under 41"] <- NA
+warp$age1 <- factor(warp$age1,levels=c("Under 21","21-30","31-40","41-50","51-60","61-70","71-80","Over 80"))
+
+warp$age2 <- paste(warp$age)
+warp$age2[warp$age2 %in% c("Under 21","21-30","31-40")] <- NA
+warp$age2 <- factor(warp$age2,levels=c("Under 41","41-50","51-60","61-70","71-80","Over 80"))
+warp$wave_label <- NA
+warp$wave_label[warp$wave=="Window 1"] <- "Mar-May '20"
+warp$wave_label[warp$wave=="Window 2"] <- "Jun-Sep '20"
+warp$wave_label[warp$wave=="Window 3"] <- "Oct-Dec '20"
+warp$wave_label[warp$wave=="Window 4"] <- "Jan-Feb '21"
+warp$wave_label[warp$wave=="Window 5"] <- "Mar-Apr '21"
+warp$wave_label[warp$wave=="Window 6"] <- "May-Jun '21"
+warp$wave_label[warp$wave=="Window 7"] <- "Jul-Aug '21"
+warp$wave_label[warp$wave=="Window 8"] <- "Sep-Oct '21"
+
+warp$wave_label <- factor(warp$wave_label,levels=c("Mar-May '20", "Jun-Sep '20", "Oct-Dec '20","Jan-Feb '21","Mar-Apr '21","May-Jun '21", "Jul-Aug '21"))
+ggplot(warp[warp$race %in% c("Black","Hispanic-Latino") & !is.na(warp$age1),],aes(x=RR.case,y=age1,color=race)) + 
+  #geom_point() +
+  geom_pointrange(aes(xmax = RR.case.95CI.upper, xmin = RR.case.95CI.lower), linetype=1, position=position_dodge(width=0.5)) +
+  facet_wrap(~wave_label,ncol=1,scales="fixed") + 
+  scale_color_manual(values=wespal[c(2,3)]) +
+  theme(legend.position="bottom",
+        panel.grid.major.x = element_line(color="gray"),
+        panel.border = element_rect(color="black",fill=NA)) + 
+  ylab("") + xlab("Relative Risk of COVID-19 Case") + 
+  labs(color="(vs. White)") +
+  scale_x_continuous(breaks=seq(0,9,1)) + 
+  scale_y_discrete(breaks = age_key) +
+  coord_cartesian(xlim=c(0.4,9)) +
+  geom_vline(xintercept=1,color="black")
+
+ggsave(paste(tag,"_RelativeRisk-Cases_By.age.race.interval.pdf",sep=""),useDingbats=FALSE, height=14,width=10)
+
+### Rolling daily averages by Age x Race for Heatmaps
+###############################################
+
+rolling.cases <- tested %>% group_by(specimen_collection,age_group,race_eth,.drop=FALSE) %>% tally()
+colnames(rolling.cases) <- c("date","age","race","cases")
+rolling.deaths <- deceased %>% group_by(deceased_date, age_group,race_eth,.drop=FALSE) %>% tally()
+colnames(rolling.deaths) <- c("date","age","race","deaths")
+
+roll.out <- merge(rolling.cases,rolling.deaths,by=c("date","age","race"),all=T)
+roll.out$deaths[is.na(roll.out$deaths)] <- 0
+roll.out$rolling.cases <- NA
+roll.out$rolling.deaths <- NA
+for(ra in unique(roll.out$race))
+{
+  for(ag in unique(roll.out$age))
+  {
+    for(d in paste(seq.Date(start_date,cutoff_date,1)))
+        {
+          dd <- as.Date(d,format="%Y-%m-%d")
+          ii <- which(roll.out$date==dd & roll.out$race == ra & roll.out$age == ag)
+          hub <- subset(roll.out, roll.out$date %in% seq(dd-6,dd,1) & roll.out$race == ra & roll.out$age == ag)
+          roll.out$rolling.cases[ii] <- mean(hub$cases,na.rm=T)
+          roll.out$rolling.deaths[ii] <- mean(hub$deaths,na.rm=T)
+    }
+  }
+}
+
+roll.out <- merge(roll.out,AGP,by=c("age","race")) # merg with population
+roll.out$age <- factor(roll.out$age,levels=age_key)
+roll.out$race <- factor(roll.out$race,levels=c("Black","Hispanic-Latino","White","Asian","Native","Other"))
+
+
+
+ggplot(roll.out[roll.out$race %in% c("Black","Hispanic-Latino","White"),],aes(x=date,y=age,fill=rolling.cases/population*10000)) +
+  geom_tile() + 
+  facet_wrap(~race,ncol=1) +
+  scale_fill_viridis_b(option="turbo", direction = 1, breaks=seq(0,12,2)) +
+  ylab("") + xlab("") + 
+  theme(legend.position = "bottom",
+        legend.key.width = unit(1.5,"cm")) + 
+  labs(fill="Daily Cases per 10,000") +
+  scale_x_date(date_breaks="2 month", date_labels="%b", limits = c(start_date,cutoff_date))
+
+ggsave(paste(tag,"_Heatmap-Rolling.Cases_By.age.race.pdf",sep=""),useDingbats=FALSE, width=16,height=12)
+```
+
+
+```{r,eval=F}
+
+rolling.cases <- tested %>% group_by(specimen_collection,age_group,race_eth,covid_region,.drop=FALSE) %>% tally()
+colnames(rolling.cases) <- c("date","age","race","covid_region","cases")
+rolling.deaths <- deceased %>% group_by(deceased_date, age_group,race_eth,covid_region,.drop=FALSE) %>% tally()
+colnames(rolling.deaths) <- c("date","age","race","covid_region","deaths")
+
+roll.out <- merge(rolling.cases,rolling.deaths,by=c("date","age","race","covid_region"),all=T)
+roll.out <- subset(roll.out,roll.out$date >= "2021-03-01")
+roll.out <- subset(roll.out,roll.out$race %in% c("White","Black","Hispanic-Latino"))
+roll.out$deaths[is.na(roll.out$deaths)] <- 0
+roll.out$rolling.cases <- NA
+roll.out$rolling.deaths <- NA
+
+for(i in 1:nrow(roll.out))
+{
+  r <- roll.out$race[i]
+  d <- roll.out$date[i]
+  cr <- roll.out$covid_region[i]
+  a <- roll.out$age[i]
+  
+  hub <- subset(roll.out, roll.out$date %in% seq(d-6,d,1) & roll.out$race==r & roll.out$age==a & roll.out$covid_region==cr)
+  roll.out$rolling.cases[i] <- mean(hub$cases,na.rm=T)
+  roll.out$rolling.deaths[i] <- mean(hub$deaths,na.rm=T)
+  
+  if(i %in% seq(nrow(roll.out)/10,nrow(roll.out),nrow(roll.out)/10)){print(i/nrow(roll.out))}
+}
+
+roll.out$age <- factor(roll.out$age,levels=age_key)
+roll.out$race <- factor(roll.out$race,levels=c("Black","Hispanic-Latino","White"))
+
+
+ggplot(roll.out[roll.out$race %in% c("Black","Hispanic-Latino","White") & !is.na(roll.out$age) & !is.na(roll.out$covid_region),],aes(x=date,y=age,fill=rolling.cases)) +
+  geom_tile() + 
+  facet_wrap(covid_region~race,ncol=6) +
+  scale_fill_fermenter(palette ="Spectral", breaks = seq(0,70,10)) +
+  ylab("") + xlab("") + 
+  theme(legend.position = "bottom",
+        legend.key.width = unit(1.5,"cm")) + 
+  labs(fill="Daily Cases") +
+  scale_x_date(date_breaks="1 month", date_labels="%b", limits = c(start_date,cutoff_date))
+#ggsave(paste(gwd,"/",tag,"Heatmap-Rolling.Cases_By.age.race.pdf",sep=""),useDingbats=FALSE)
+
+```
+
+
+## Figure 6
+```{r,echo=F}
+
+#### Figure 6 A & B
+#### Deaths per capita by Age and Race
+
+ggplot(warp[warp$race %in% c("Black","Hispanic-Latino") & !is.na(warp$age2) & warp$wave != "Window 8",],aes(x=RR.death,y=age2,color=race)) + 
+  #geom_point() +
+  geom_pointrange(aes(xmax = RR.death.95CI.upper, xmin = RR.death.95CI.lower), linetype=1, position=position_dodge(width=0.5)) +
+  facet_wrap(~wave_label,ncol=1) + 
+  scale_color_manual(values=wespal[c(2,3)]) +
+  theme(legend.position="bottom",
+        panel.grid.major.x = element_line(color="gray"),
+        panel.border = element_rect(color="black", fill=NA)) + 
+  ylab("") + xlab("Relative Risk of COVID-19 Death") + 
+  labs(color="") +
+  scale_x_continuous(breaks=seq(0,20,2)) + 
+  coord_cartesian(xlim=c(0,20)) +
+  geom_vline(xintercept=1,color="black")
+
+ggsave(paste(tag,"_RelativeRisk-Deaths_By.age.race.interval.pdf",sep=""),useDingbats=FALSE, width=10, height=12)
+
+ggplot(roll.out[roll.out$race %in% c("Black","Hispanic-Latino","White"),],aes(x=date,y=age,fill=rolling.deaths/population*100000)) +
+  geom_tile() + 
+  facet_wrap(~race,ncol=1) +
+  scale_fill_viridis_b(breaks=seq(0,30,3),option="turbo", direction = 1) +
+  ylab("") + xlab("") + 
+  theme(legend.position = "bottom",
+        legend.text=element_text(size=10),
+        legend.key.width = unit(1.5,"cm")) + 
+  labs(fill="Daily Deaths per 100,000") +
+  scale_x_date(date_breaks="2 month", date_labels="%b", limits = c(start_date,cutoff_date))
+
+ggsave(paste(tag,"_Heatmap-Rolling.Deaths_By.age.race.pdf",sep=""),useDingbats=FALSE,width=16,height=12)
+
+
+
+```
+
+
+## Figure 7
+
+```{r}
+
+# Weekly Case/Death counts
+difference <- deceased$specimen_collection- marker
+deceased$week2 <- trunc(difference/7) + 1
+
+cw <- tested %>% group_by(week,age_group,race_eth,.drop=F) %>% tally()
+
+dw <- deceased %>% group_by(week2,age_group,race_eth,.drop=F) %>% tally()
+
+dod <- merge(cw,dw,by.x=c("week","age_group","race_eth"),by.y=c("week2","age_group","race_eth"),all=T)
+
+colnames(dod) <- c("week","age","race","cases","deaths")
+
+dod <- merge(dod,AGP, by=c("age","race"),all=T)
+
+for(i in 1:nrow(dod))
+{
+  r <- dod$race[i]
+  a <- dod$age[i]
+  w <- as.integer(paste(dod$week[i]))
+  
+  nub <- subset(dod, dod$age == a & dod$race == r & as.integer(paste(dod$week)) %in% seq(w-1,w+1,1))
+  
+  dod$roll.case[i] <- mean(nub$cases,na.rm=T)
+  dod$roll.death[i] <- mean(nub$deaths,na.rm=T)
+}
+
+dod$dod.mortality <- NA
+dod$dod.cfr <- NA
+dod$dod.incidence <- NA
+dod$dod.both <- NA
+
+for(i in 1:nrow(dod))
+{
+  w <- dod$week[i]
+  r <- dod$race[i]
+  a <- dod$age[i]
+  
+  ref_deathrate <- dod$roll.death[which(dod$week==w & dod$age == a & dod$race == "White")]/dod$population[which(dod$week == w & dod$age == a & dod$race == "White")]
+  ref_incidence <- dod$roll.case[which(dod$week==w & dod$age == a & dod$race == "White")]/dod$population[which(dod$week == w & dod$age == a & dod$race == "White")]
+   ref_cfr <- dod$roll.death[which(dod$week==w & dod$age == a & dod$race == "White")]/dod$roll.case[which(dod$week==w & dod$age == a & dod$race == "White")]
+  
+  if(length(ref_deathrate)>0){dod$dod.mortality[i] <- dod$population[i]*ref_deathrate}
+   
+  if(length(ref_incidence)>0){dod$dod.incidence[i] <- (dod$population[i]*ref_incidence)*(dod$roll.death[i]/dod$roll.case[i])}
+   
+  if(length(ref_cfr)>0){dod$dod.cfr[i] <- dod$roll.case[i]*ref_cfr}
+  
+   if(length(ref_incidence)>0 & length(ref_cfr) >0){dod$dod.both[i] <- (dod$population[i]*ref_incidence)*(ref_cfr)}
+}
+
+deaths.disp <- dod %>% group_by(race,week) %>%
+  summarise_at(vars(deaths,roll.death, dod.mortality, dod.incidence, dod.cfr, dod.both), funs(sum), na.rm = TRUE)
+deaths.disp <- data.frame(deaths.disp)
+
+deaths.disp$dif.dod.mortality <- deaths.disp$roll.death-deaths.disp$dod.mortality
+deaths.disp$dif.dod.incidence <- deaths.disp$roll.death-deaths.disp$dod.incidence
+deaths.disp$dif.dod.cfr <- deaths.disp$roll.death-deaths.disp$dod.cfr
+deaths.disp$dif.dod.both <- deaths.disp$roll.death-deaths.disp$dod.both
+#deaths.disp
+
+deaths.disp.melt <- melt(deaths.disp,id.vars=c("week","race"))
+deaths.disp.melt
+
+
+sub <- deaths.disp.melt[deaths.disp.melt$race %in% c("Black","Asian","Hispanic-Latino","White") & deaths.disp.melt$variable %in% c("roll.death","dod.incidence","dod.cfr","dod.mortality"),]
+sub$variable <- factor(sub$variable,levels=c("dod.mortality","dod.incidence","dod.cfr","roll.death"))
+
+theme_set(theme_base(base_size=16))
+ggplot(data=sub, aes(x=as.Date((as.numeric(paste(week))-1)*7+marker), color=variable)) +
+  geom_line(aes(y=value), size = 1) +
+  facet_wrap(~race,scales="free_y",ncol=1) +
+  scale_color_manual(values=c("#2A317A","#A95AA2", "#8DBDE6","#E75A41"), labels = c("Matched Mortality","Matched Incidence","Matched CFR","Actual")) +
+  xlab("") + ylab("Deaths") +
+  labs(fill="",color="") +
+  scale_x_date(date_breaks="3 months",date_labels="%b '%y", expand=c(0.05,0)) + 
+  scale_y_continuous(expand=expansion(mult=c(0,0.02))) +
+  theme(legend.position="bottom")
+
+ggsave(paste(tag,"_Counterfactual Death Curves.pdf",sep=""),useDingbats=FALSE, width = 16, height = 12)
+
+```
+
+
+```{r,echo=F}
+deaths.disp.clean <- deaths.disp[is.finite(deaths.disp$dod.cfr) & is.finite(deaths.disp$dod.incidence) & is.finite(deaths.disp$dod.mortality),]
+
+deaths.disp.total <- data.frame(deaths.disp.clean %>% group_by(race) %>% summarise_if(is.numeric,funs(sum)))
+
+deaths.disp.total$p.dod.mortality <- (deaths.disp.total$dif.dod.mortality)/deaths.disp.total$deaths
+deaths.disp.total$p.dod.incidence <- (deaths.disp.total$dif.dod.incidence)/deaths.disp.total$deaths
+deaths.disp.total$p.dod.cfr<- (deaths.disp.total$dif.dod.cfr)/deaths.disp.total$deaths
+
+deaths.disp.total$sim.red.incidence <- (deaths.disp.total$dif.dod.incidence/deaths.disp.total$dif.dod.mortality)
+deaths.disp.total$sim.red.cfr <- (deaths.disp.total$dif.dod.cfr/deaths.disp.total$dif.dod.mortality)
+
+deaths.disp.total <- melt(deaths.disp.total,id.vars="race")
+
+ggplot(deaths.disp.total[deaths.disp.total$race %in% c("Black","Hispanic-Latino","Asian") & deaths.disp.total$variable %in% c("p.dod.mortality","p.dod.incidence","p.dod.cfr"),], aes(x=race,y=value*100,fill=variable)) +
+  geom_bar(stat="identity",position="dodge") + 
+  geom_hline(yintercept = 0, size=0.5,color="black") +
+  facet_wrap(~race,scales="free_x",nrow=1) +
+  ylab("% Reduction in Deaths") + xlab("") +
+  labs(fill="") +
+  scale_fill_manual(values=c("#2A317A","#A95AA2","#8DBDE6"), labels = c("Matched Mortality","Matched Incidence","Matched CFR")) +
+  theme(legend.position="bottom",
+        panel.grid.major.y=element_line(color="black",size=0.1),
+        axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        panel.border = element_rect(color="black",fill="transparent")) +
+  scale_y_continuous(breaks=seq(-20,70,10)) + xlab("") +
+  scale_x_discrete(expand=c(0.5,0))
+
+ggsave(paste(tag,"_Counterfactual Percent Reduction in Deaths.pdf",sep=""),useDingbats=FALSE)
+
+### Repeat Counterfactual Percent Reduction by Interval
+
+deaths.disp.melt$date <- as.Date((as.numeric(paste(deaths.disp.melt$week))-1)*7+marker)
+
+deaths.disp.melt$chunk <- NA
+deaths.disp.melt$chunk[deaths.disp.melt$date >= "2021-03-01"] <- "Mar-Sep '21"
+deaths.disp.melt$chunk[deaths.disp.melt$date < "2021-03-01"] <- "Oct '20 - Mar '21"
+deaths.disp.melt$chunk[deaths.disp.melt$date < "2020-10-01"] <- "Mar-Sep '20"
+
+#dod.chunks <-  deaths.disp.melt[deaths.disp.melt$variable %in% c("deaths","roll.death","dod.mortality","dod.incidence","dod.cfr"),]
+dod.chunks <- aggregate(deaths.disp.melt$value,by=list(deaths.disp.melt$race,deaths.disp.melt$variable,deaths.disp.melt$chunk), FUN=sum)
+colnames(dod.chunks) <- c("race","variable","chunk","value")
+
+
+races <- c()
+chunks <- c()
+pms <- c()
+pis <- c()
+pcs <- c()
+
+for(c in unique(dod.chunks$chunk))
+{
+  for(r in unique(dod.chunks$race))
+  {
+    nub <- subset(dod.chunks, dod.chunks$race==r & dod.chunks$chunk==c)
+    pm <- nub$value[nub$variable=="dif.dod.mortality"] / nub$value[nub$variable=="deaths"]
+    pi <- nub$value[nub$variable=="dif.dod.incidence"] / nub$value[nub$variable=="deaths"]
+    pc <- nub$value[nub$variable=="dif.dod.cfr"] / nub$value[nub$variable=="deaths"]
+    
+    races <- c(races,r)
+    chunks <- c(chunks,c)
+    pms <- c(pms,pm)
+    pis <- c(pis,pi)
+    pcs <- c(pcs,pc)
+  }
+}
+
+chunky.dod <- data.frame(races,chunks,pms,pis,pcs)
+chunky.dod.melt <- melt(chunky.dod, id.vars = c("races","chunks"))
+
+chunky.dod.melt$chunks <- factor(chunky.dod.melt$chunks,levels = c("Mar-Sep '20", "Oct '20 - Mar '21", "Mar-Sep '21"))
+
+ggplot(chunky.dod.melt[chunky.dod.melt$races %in% c("Black","Hispanic-Latino","Asian"),], aes(x=chunks,y=value*100,fill=variable)) +
+  geom_bar(stat="identity",position="dodge") + 
+  geom_hline(yintercept = 0, size=1,color="black") +
+  facet_wrap(races~chunks,scales="free_x",nrow=3) +
+  ylab("% Reduction in Deaths") + xlab("") +
+  labs(fill="") +
+  scale_fill_manual(values=c("#2A317A","#A95AA2","#8DBDE6"), labels = c("Matched Mortality","Matched Incidence","Matched CFR")) +
+  theme(legend.position="bottom",
+        panel.grid.major.y=element_line(color="gray",size=0.1, linetype = 2),
+        axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        panel.border = element_rect(color="black",fill="transparent")) +
+  scale_y_continuous(breaks=seq(-75,75,15)) + xlab("") +
+  scale_x_discrete(expand=c(0.5,0))
+
+ggsave(paste(tag,"_Counterfactual Percent Reduction in Deaths - By Interval.pdf",sep=""),useDingbats=FALSE, width=10, height=10)
+
+
+# ggplot(deaths.disp.total[deaths.disp.total$race %in% c("Black","Hispanic-Latino","Asian") & deaths.disp.total$variable %in% c("dif.dod.cfr","dif.dod.incidence","dif.dod.mortality"),], aes(x=race,y=value,fill=variable)) +
+#   geom_bar(stat="identity",position="dodge") + facet_wrap(~race,scales="free") +
+#   ylab("Deaths Averted") + xlab("") +
+#   labs(fill="") +
+#   scale_fill_manual(values=c("#2A317A","#A95AA2","#8DBDE6"), labels = c("Matched Mortality","Matched Incidence","Matched CFR")) +
+#   theme(legend.position="bottom")
+
+# options(scipen=999)
+# deaths.disp.total
+
+```
+
+## Figure 5
+
+```{r,echo=F}
+
+#### FIGURE 5A & B
+#### Testing and TPR by age & Race
+
+# Load testing data
+tests <-  read.csv(tk_choose.files(caption = "Select Testing Dataset"),stringsAsFactors = F)
+
+tests$age_group3 <- NA
+tests$age_group3[which(tests$age > 0 & tests$age < 11)] <- "Under 10"
+tests$age_group3[which(tests$age > 10 & tests$age <18)] <-  "11-17"
+tests$age_group3[which(tests$age > 17 & tests$age <23)] <-  "18-22"
+tests$age_group3[which(tests$age > 22 & tests$age < 31)] <- "23-30"
+tests$age_group3[which(tests$age > 30 & tests$age < 41)] <- "31-40"
+tests$age_group3[which(tests$age > 40 & tests$age < 51)]  <- "41-50"
+tests$age_group3[which(tests$age > 50 & tests$age < 61)]  <- "51-60"
+tests$age_group3[which(tests$age > 60 & tests$age < 71)]  <- "61-70"
+tests$age_group3[which(tests$age > 70 & tests$age < 81)]  <- "71-80"
+tests$age_group3[which(tests$age > 80 & tests$age < 101)]  <- "Over 80"
+
+tests$age_group3 <- factor(tests$age_group3,levels=c("Under 10", "11-17", "18-22", "23-30", "31-40", "41-50","51-60","61-70","71-80","Over 80"))
+
+tests <- subset(tests,as.Date(tests$date,format="%Y-%m-%d") >= start_date)
+tests <- subset(tests,as.Date(tests$date,format="%Y-%m-%d") <= cutoff_date)
+
+pos_vs_time_age_race <- aggregate(tests$positive_specs,by=list(tests$date,tests$age_group3,tests$race),FUN=sum)
+tests_vs_time_age_race <- aggregate(tests$total_specs,by=list(tests$date,tests$age_group3,tests$race),FUN=sum)
+
+
+testing_pops <- aggregate(IL_age_race$POPESTIMATE2019,by=list(IL_age_race$race_eth,IL_age_race$age_group3),FUN=sum)
+colnames(testing_pops) <- c("race_eth","age_group3","pop")
+testing_pops$race_eth[which(testing_pops$race_eth=="Black")] <- "Black or African American"
+testing_pops$race_eth[which(testing_pops$race_eth=="Hispanic-Latino")] <- "Hispanic"
+
+testing_pops <- merge(tests_vs_time_age_race, testing_pops, by.x=c("Group.2","Group.3"),by.y=c("age_group3","race_eth"))
+
+testing_pops$rollings <- NA
+testing_pops$Group.1 <- as.Date(testing_pops$Group.1,format="%Y-%m-%d")
+for (i in 1:nrow(testing_pops))
+{
+  d <- as.Date(testing_pops$Group.1[i])
+  sub <- subset(testing_pops, testing_pops$Group.2==testing_pops$Group.2[i])
+  sub <- subset(sub, sub$Group.3 == testing_pops$Group.3[i])
+  sub <- subset(sub, sub$Group.1 %in% seq.Date(from=d-6, to =d-1,by=1))
+  testing_pops$rollings[i] <- mean(sub$x,na.rm=T)
+}
+
+htpc <- testing_pops[testing_pops$Group.1 >= start_date & testing_pops$Group.1 < cutoff_date & testing_pops$Group.3 %in% c("White","Hispanic","Black or African American"),]
+
+colnames(htpc) <- c("age","race","date","n","p","rollings")
+ heatmap_tpc <-  ggplot(data=htpc, x = date, y = factor(age), fill = rollings/p*1000) +
+     geom_tile(aes(x=date, y = factor(age), fill = rollings/p*1000)) +
+     facet_wrap(~race,ncol=1) +
+     #scale_fill_distiller(palette ="Spectral", direction = -1, limits = c(0,NA)) + 
+     scale_fill_viridis_b(breaks=seq(0,15,2),option="turbo", direction=1) +
+     scale_y_discrete(limits = factor(age_key3)) + 
+     #scale_x_date(breaks = seq(min(positives$,na.rm=T),max(positives$labs,na.rm=T),by="week"), labels = date_format(format = "%b %d"),expand = c(0,0)) +
+     scale_x_date(date_labels="%b '%y", date_breaks  ="1 month", expand=c(0,0)) +
+     xlab("") + ylab("") +
+     theme(axis.text.y=element_text(size=12),
+           axis.text.x=element_text(angle=0,vjust=0),
+           panel.grid = element_blank(),
+           legend.key.width = unit(1.5,"cm"),
+           legend.position="bottom") +
+     labs(fill="Tests per 1,000 people") #+ xlim(as.Date("2020-03-01",format="%Y-%m-%d"),NA)
+  heatmap_tpc
+
+  ggsave(paste(tag,"Heatmap - Rolling Daily Tests per Thousand by Age and Race.pdf", sep=""),useDingbats=FALSE, height=8, width=14)  
+
+colnames(tests_vs_time_age_race) <- c("Date","Age","Race","Tests")
+colnames(pos_vs_time_age_race) <- c("Date","Age","Race","Positives")
+tpr_table_age_race <- merge(tests_vs_time_age_race, pos_vs_time_age_race,by=c("Date","Race","Age"))
+tpr_table_age_race$tpr <- tpr_table_age_race$Positives/tpr_table_age_race$Tests
+
+tpr_table_age_race_pop <- merge(tpr_table_age_race, testing_pops, by.x = c("Race","Age"), by.y = c("Group.3","Group.2"))
+tpr_table_age_race_pop$pct_test <- tpr_table_age_race_pop$Tests / tpr_table_age_race_pop$pop * 100
+
+tpr_table_age_race_pop <- subset(tpr_table_age_race_pop, tpr_table_age_race_pop$Race %in% c("White","Hispanic","Black or African American"))
+
+# Rolling TPR
+tpr_table_age_race$rolling_tpr <- NA
+tpr_table_age_race$Date <- as.Date(tpr_table_age_race$Date,format="%Y-%m-%d")
+for (i in 1:nrow(tpr_table_age_race))
+{
+  d <- tpr_table_age_race$Date[i]
+  sub <- subset(tpr_table_age_race, tpr_table_age_race$Age==tpr_table_age_race$Age[i])
+  sub <- subset(sub, sub$Race == tpr_table_age_race$Race[i])
+  sub <- subset(sub, sub$Date %in% seq.Date(from=d-6, to =d,by=1))
+  tpr_table_age_race$rolling_tpr[i] <- mean(sub$tpr,na.rm=T)
+}
+
+
+htpr <- tpr_table_age_race[tpr_table_age_race$Date >= start_date & tpr_table_age_race$Date < cutoff_date & tpr_table_age_race$Race %in% c("White","Hispanic","Black or African American"),]
+heatmap_tpr <-  ggplot(data=htpr, x = Date, y = factor(Age), fill = rolling_tpr*100) +
+     geom_tile(aes(x=Date, y = factor(Age), fill = rolling_tpr*100)) +
+     facet_wrap(~Race,ncol=1) +
+     #scale_fill_distiller(palette ="Spectral", direction = -1, limits = c(0,NA)) + 
+     scale_fill_viridis_b(breaks=seq(0,50,5),option="turbo", direction=1, begin=0,end=1) +
+     scale_y_discrete(limits = factor(age_key3)) + 
+     scale_x_date(date_labels="%b '%y", date_breaks  ="1 month", expand=c(0,0)) +
+     xlab("") + ylab("") +
+     theme(axis.text.y=element_text(size=12),
+           axis.text.x=element_text(angle=0,vjust=0),
+           panel.grid = element_blank(),
+           legend.position = "bottom",
+           legend.key.width=unit(2,"cm")) +
+     labs(fill="Test Positivity Rate (%)")
+  heatmap_tpr
+  
+  ggsave(paste(tag,"Heatmap - Rolling TPR by Age and Race.pdf", sep=""),useDingbats=FALSE, width=14, height=8)  
+  
+#### AS Lines
+  
+# age_colors3 <- RColorBrewer::brewer.pal(12,"Paired")
+# age_colors3 <- c(age_colors3,RColorBrewer::brewer.pal(9,"Set1"))
+# age_colors3 <- c(age_colors3,"#000000")
+# age_colors3 <- age_colors3[c(9,10,2,1,4,3,8,7,6,5)]
+# 
+#   lineplot_tpc <-  ggplot(data=htpc, aes(x = date, y =rollings/p*1000, color = age))+
+#      geom_line(size=2,alpha=0.75)+
+#      facet_wrap(~race,nrow=1,scales="free_y") +
+#      #scale_fill_distiller(palette ="Spectral", direction = -1, limits = c(0,NA)) + 
+#      #scale_fill_fermenter(palette = "Spectral", breaks=seq(0,10,1)) +
+#     scale_color_manual(values=age_colors3) +
+#      scale_y_continuous(breaks = seq(0,15,1)) + 
+#      #scale_x_date(breaks = seq(min(positives$,na.rm=T),max(positives$labs,na.rm=T),by="week"), labels = date_format(format = "%b %d"),expand = c(0,0)) +
+#      scale_x_date(date_labels="%m/%d", date_breaks  ="2 weeks", expand=c(0,0)) +
+#      xlab("") + ylab("Tests per 1,000 people") +
+#      theme(axis.text.y=element_text(size=12),
+#            axis.text.x=element_text(angle=0,vjust=0.5),
+#            panel.grid.major = element_line(color="gray",size=0.3),
+#            legend.key.width = unit(1.5,"cm"),
+#            legend.position="bottom") +
+#      labs(color="Age")
+#   lineplot_tpc
+
+```
+
+
+## Figure 3
+
+#### Geographic Analysis by COUNTY
+
+```{r, eval=F}
+
+# Load county population data
+county.pop <- read.csv(tk_choose.files(caption="Select County-level Census Data"), stringsAsFactors = F)
+
+
+county.pop$CTYNAME <- unlist(strsplit(county.pop$CTYNAME," County"))
+county.pop <- subset(county.pop,county.pop$YEAR==12)
+county.age.key <- c("Total","0-4","5-9","10-14","15-19","20-24","25-29","30-34","35-39","40-44","45-49","50-54","55-59","60-64","65-69","70-74","75-79","80-84","Over 85")
+county.pop$AGEGRP <- county.age.key[county.pop$AGEGRP+1]
+
+cp <- county.pop[,c("COUNTY","CTYNAME","AGEGRP","TOT_POP","NHWA_MALE","NHWA_FEMALE")]
+
+cp$NHW_TOTAL <- cp$NHWA_MALE+cp$NHWA_FEMALE
+cp$POC_TOTAL <- cp$TOT_POP-cp$NHW_TOTAL 
+
+cp$AGEGRP2[cp$AGEGRP %in% c("0-4","5-9","10-14","15-19")] <- "Under 21"
+cp$AGEGRP2[cp$AGEGRP %in% c("20-24","25-29")] <- "21-30" 
+cp$AGEGRP2[cp$AGEGRP %in% c("30-34","35-39")] <- "31-40" 
+cp$AGEGRP2[cp$AGEGRP %in% c("40-44","45-49")] <- "41-50" 
+cp$AGEGRP2[cp$AGEGRP %in% c("50-54","55-59")] <- "51-60" 
+cp$AGEGRP2[cp$AGEGRP %in% c("60-64","65-69")] <- "61-70" 
+cp$AGEGRP2[cp$AGEGRP %in% c("70-74","75-79")] <- "71-80" 
+cp$AGEGRP2[cp$AGEGRP %in% c("80-84","Over 85")] <- "Over 80" 
+cp$AGEGRP2[cp$AGEGRP == "Total"] <- "Total" 
+
+cp.group <- cp %>% group_by(AGEGRP2, CTYNAME) %>% 
+  summarise_if(.predicate = function(x) is.numeric(x),
+               .funs = funs(sum="sum"))
+
+cp.group <- data.frame(cp.group)
+cp.group <- cp.group[,c("AGEGRP2","CTYNAME","TOT_POP_sum","NHW_TOTAL_sum","POC_TOTAL_sum")]
+colnames(cp.group) <- c("age","county","pop.total","pop.white","pop.nonwhite")
+cp.group$county[cp.group$county=="De Witt"] <- "Dewitt"
+
+
+tested.factored <- tested
+tested.factored$age_group <- factor(tested.factored$age_group)
+tested.factored$wave <- factor(tested.factored$wave)
+tested.factored$race_eth <- factor(tested.factored$race_eth)
+tested.factored$county_at_onset_mod <- factor(tested.factored$county_at_onset_mod)
+
+county.cases <- tested.factored %>% group_by(age_group,wave,race_eth, county_at_onset_mod, .drop=FALSE) %>% tally()
+county.cases <- data.frame(county.cases) 
+table(county.cases$county_at_onset_mod)
+county.cases$county_at_onset_mod <- paste(county.cases$county_at_onset_mod)
+county.cases$county_at_onset_mod[which(county.cases$county_at_onset_mod=="StClair")] <- "ST. CLAIR"
+county.cases$county_at_onset_mod[which(county.cases$county_at_onset_mod=="RockIsland")] <- "ROCK ISLAND"
+county.cases$county_at_onset_mod[which(county.cases$county_at_onset_mod=="Jodaviess")] <- "JO DAVIESS"
+
+
+counties <- c()
+ages <- c()
+p.t <- c()
+p.w <- c()
+p.nw <- c()
+c.t <- c()
+c.r <- c()
+c.w <- c()
+c.nw <- c()
+waves <- c()
+
+for(w in 1:8)
+{
+  for(i in 1:nrow(cp.group))
+  {
+    county <- toupper(cp.group$county[i])
+    a <- cp.group$age[i]
+    interval <- paste("Window",w,sep=" ")
+    hub <- subset(county.cases, toupper(county.cases$county_at_onset_mod) == county)
+    hub <- subset(hub,hub$age_group == a)
+    hub <- subset(hub,hub$wave==interval)
+    if(nrow(hub)>1)
+    {
+    counties <- c(counties,county)
+    ages <- c(ages,a)
+    waves <- c(waves,w)
+    p.t <- c(p.t,cp.group$pop.total[i])
+    p.w <- c(p.w,cp.group$pop.white[i])
+    p.nw <- c(p.nw,cp.group$pop.nonwhite[i])
+    c.t <- c(c.t,sum(hub$n, na.rm=T))
+    c.r <- c(c.r,sum(hub$n[hub$race_eth != "Unknown"],na.rm = T))
+    c.nw <- c(c.nw, sum(hub$n[!(hub$race_eth %in% c("Unknown","White"))], na.rm=T))
+    c.w <- c(c.w,sum(hub$n[hub$race_eth=="White"],na.rm=T))
+    }
+  }
+}
+
+county.trend <- data.frame(counties,ages,waves,p.t,p.w,p.nw,c.t,c.r,c.w,c.nw)
+county.trend$ages <- factor(county.trend$ages,levels=age_key)
+
+# ggplot(data=county.trend[county.trend$c.r>=10,], aes(x=p.nw/p.t*100,y=c.nw/c.r*100,fill=c.t/p.t*1000,size=c.r,weight=c.r)) +
+#   geom_point(alpha=1,shape=21) +
+#   geom_smooth(se=T,color="blue") + 
+#   geom_abline(slope=1,linetype=2) +
+#   facet_grid(vars(waves),vars(ages)) +
+#   #scale_color_distiller(palette = "YlOrRd",direction=1) +
+#   scale_fill_fermenter(palette = "YlOrRd",direction=1, breaks=seq(0,100,20)) +
+#   xlim(0,70) + ylim(0,100) +
+#   labs(color = "Cases per 1,000",fill="Cases per 1,000") + ylab("% of Cases Non-White") + xlab("% of County Non-White") + 
+#   theme(legend.position="bottom",legend.key.width = unit(2,"cm")) + 
+#   guides(size=FALSE)
+# 
+# ggplot(data=county.trend[county.trend$c.r>=10,], aes(x=p.nw/p.t*100,y=c.nw/c.r*100,fill=c.t/p.t*1000,size=c.r,weight=c.r)) +
+#   geom_point(alpha=1,shape=21) +
+#   geom_smooth(se=T,color="blue") + 
+#   geom_abline(slope=1,linetype=2) +
+#   facet_grid(vars(waves),vars(ages)) +
+#   #scale_color_distiller(palette = "YlOrRd",direction=1) +
+#   scale_fill_fermenter(palette = "YlOrRd",direction=1, breaks=seq(0,100,20)) +
+#   xlim(0,70) + ylim(0,100) +
+#   labs(color = "Cases per 1,000",fill="Cases per 1,000") + ylab("% of Cases Non-White") + xlab("% of County Non-White") + 
+#   theme(legend.position="bottom",legend.key.width = unit(2,"cm")) + 
+#   guides(size=FALSE)
+# 
+# ggplot(data=county.trend[county.trend$c.r>=10,],  aes(x = c.w/p.w*1000, y = c.nw/p.nw*1000, fill = p.nw/p.t*100, size=c.r,weight=c.r)) +
+#   geom_point(alpha=0.5,shape=21) +
+#   #geom_smooth(se=T,color="Reds") + 
+#   geom_abline(slope=1,linetype=2) +
+#   facet_wrap(~waves+ages,scales = "free",ncol=8) +
+#   scale_fill_fermenter(palette = "YlGn",direction=1, breaks=seq(0,100,10)) +
+#   #xlim(0,70) + ylim(0,100)
+#   labs(fill="% of County Non-White") + ylab("Cases per 1,000 (Non-White)") + xlab("Cases per 1,000 (White)") + 
+#   theme(legend.position="bottom",legend.key.width = unit(2,"cm")) +
+#   guides(size=FALSE)
+
+county.trend$RR.nw <- (county.trend$c.nw/county.trend$p.nw) / (county.trend$c.w/county.trend$p.w)
+
+county.trend$c.uk <- (1-(county.trend$c.r/county.trend$c.t))*100
+
+#### MAPS
+
+# Load county shapefile
+county_sf <- st_read(tk_choose.files(captio="Select County Shapefile"))
+
+county.trend$counties <-paste(county.trend$counties)
+county.trend$counties <- toupper(county.trend$counties)
+merged_counties <- merge(y=county.trend,x=county_sf,by.y="counties",by.x="COUNTY_NAM",all=T)
+merged_counties$pct_nonwhite <- merged_counties$p.nw/merged_counties$p.t*100
+merged_counties$pct_cases_nonwhite <- merged_counties$c.nw/merged_counties$c.r*100
+merged_counties$cases_missing <- 100-(merged_counties$c.r/merged_counties$c.t)*100
+
+merged_counties$lnRR.nw <- log(merged_counties$RR.nw)
+merged_counties$RR.seLN <- sqrt((1/merged_counties$c.nw - 1/merged_counties$p.nw) + (1/merged_counties$c.w - 1/merged_counties$p.w))
+merged_counties$lnRR.nw.upper <- merged_counties$lnRR.nw + 1.96*merged_counties$RR.seLN
+merged_counties$lnRR.nw.lower <- merged_counties$lnRR.nw - 1.96*merged_counties$RR.seLN
+merged_counties$RR.nw.upper <- exp(merged_counties$lnRR.nw.upper)
+merged_counties$RR.nw.lower <- exp(merged_counties$lnRR.nw.lower)
+
+quantile(merged_counties$RR.nw, probs=seq(0,1,0.05),na.rm=T)
+
+
+merged_counties$RR.nw[which(merged_counties$RR.nw < 1)] <- -1/merged_counties$RR.nw[which(merged_counties$RR.nw < 1)] 
+merged_counties$RR.nw.upper[which(merged_counties$RR.upper < 1)] <- -1/merged_counties$RR.nw.upper[which(merged_counties$RR.nw.upper < 1)] 
+merged_counties$RR.nw.lower[which(merged_counties$RR.nw.lower < 1)] <- -1/merged_counties$RR.nw.lower[which(merged_counties$RR.nw.lower < 1)] 
+
+quantile(merged_counties$RR.nw, probs=seq(0,1,0.05),na.rm=T)
+
+
+merged_counties$RR.nw[which(merged_counties$c.nw<10 | merged_counties$c.w <10)] <- NA
+merged_counties$RR.nw[which(merged_counties$RR.nw.upper > 0 & merged_counties$RR.nw.lower < 0)] <- 0
+merged_counties$RR.nw[which(merged_counties$RR.nw.lower > 0 & merged_counties$RR.nw.upper < 0)] <- 0
+
+quantile(merged_counties$RR.nw, probs=seq(0,1,0.05),na.rm=T)
+
+library(RColorBrewer)
+rr.pal <- c("#FFFFFF",brewer.pal(9, "YlGnBu"))
+
+
+# cmap.rr.1 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==1,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette =rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+# #cmap.rr.1
+# 
+# cmap.rr.2 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==2,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+# #cmap.rr.2
+# 
+# cmap.rr.3 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==3,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+# #cmap.rr.3
+# 
+# cmap.rr.4 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==4,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+# 
+# #cmap.rr.4
+# 
+# cmap.rr.4 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==4,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+# 
+# #cmpa.rr.4
+# 
+# cmap.rr.5 <- tm_shape(merged_counties[merged_counties$ages!="Missing" & merged_counties$waves==5,]) + 
+#    #tm_polygons(border.alpha=1) + 
+#    tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+#    #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+#    tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, asp=1) +
+#   tm_facets(by="ages",nrow=1)
+
+#tmap_arrange(cmap.rr.1,cmap.rr.2, cmap.rr.3,cmap.rr.4,ncol=1)
+merged_counties$waves <- paste(merged_counties$waves)
+merged_counties$waves[merged_counties$waves=="1"] <- "1: March 1-May 31 (2020)" 
+merged_counties$waves[merged_counties$waves=="2"] <- "2: June 1-Sept 30 (2020)" 
+merged_counties$waves[merged_counties$waves=="3"] <- "3: Oct 1-Dec 31 (2020)" 
+merged_counties$waves[merged_counties$waves=="4"] <- "4: Jan 1-Feb 28 (2021)" 
+merged_counties$waves[merged_counties$waves=="5"] <- "5: Mar 1-Apr 30 (2021)"
+merged_counties$waves[merged_counties$waves=="6"] <- "6: May 1-Jun 30 (2021)"
+merged_counties$waves[merged_counties$waves=="7"] <- "7: Jul 1-Aug 31 (2021)"
+
+cmap.rr.grid <- tm_shape(merged_counties[merged_counties$ages!="Missing",]) + 
+   #tm_polygons(border.alpha=1) + 
+   tm_polygons(col = "RR.nw",palette = rr.pal,style="fixed", breaks=c(0,1,2,3,4,5,10,15,20,25,Inf), title = "Relative Risk", border.alpha=1, colorNA ="gray",textNA = "Not enough data",legend.show=T) + 
+   #tm_bubbles(size="population",col="pct_nonwhite",size.lim=c(0,NA), title.size = "Population", title.col = "% Pop. Nonwhite",scale=0.9) +
+   tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9,inner.margins=c(0,0,0,0), outer.margins = c(0,0,0,0),legend.height = -3, asp=1) +
+  tm_facets(by=c("waves","ages"),nrow=1)
+cmap.rr.grid
+
+
+tmap_save(cmap.rr.grid, paste(gwd,"/",tag,"CountyMap-RelativeRisk.Cases.pdf",sep=""),asp=1, width = 24, height=24)
+```
+
+```{r,eval=F}
+#### Testing Map (County)
+
+county.tests <- aggregate(tests$total_specs, by = list(tests$county,tests$age_group3,tests$race,tests$date),FUN=sum)
+colnames(county.tests) <- c("county","age","race","date","total_tests")
+county.pos <- aggregate(tests$positive_specs, by = list(tests$county,tests$age_group3,tests$race,tests$date),FUN=sum)
+colnames(county.pos) <- c("county","age","race","date","positive_tests")
+county.tests <- merge(county.tests,county.pos, by=c("county","age","race","date"),all=T)
+
+county.tests <- subset(county.tests, county.tests$date >= "2021-04-01")
+county.tests$date <- as.Date(county.tests$date,format="%Y-%m-%d")
+county.tests$rolling_total <- NA
+county.tests$rolling_positive <- NA
+for(i in 1:nrow(county.tests))
+{
+  c <- county.tests$county[i]
+  d <- county.tests$date[i]
+  a <- county.tests$age[i]
+  r <- county.tests$race[i]
+  
+  hub <- subset(county.tests, county.tests$age==a & county.tests$race == r & county.tests$county==c & county.tests$date %in% seq.Date(d-6,d,1))
+  county.tests$rolling_total[i] <- mean(hub$total_tests,na.rm=T)
+  county.tests$rolling_positive[i] <- mean(hub$positive_tests,na.rm=T)
+}
+
+county.tests$rolling_tpr <- county.tests$rolling_positive/county.tests$rolling_total
+county.tests$county <- toupper(paste(county.tests$county))
+
+region_sf <- file.choose()
+region_sf <- st_read(region_sf)
+
+county_map <- merge(y=county.tests,x=region_sf,by.y="county",by.x="COUNTY_NAM",all=T)
+
+p <- county_map[county_map$date=="2021-04-25" & county_map$age %in% c("Under 10","11-17") & county_map$race %in% c("Hispanic","Asian","Black or African American","White"),]
+
+
+tmap.tpr.1 <- tm_shape(p) + 
+   tm_polygons(col = "rolling_tpr", style="cont",border.alpha=1, colorNA ="gray",textNA = "No Data") +
+  tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, ) +
+  tm_facets(by=c("age","race"),nrow=1, free.coords = F) +
+  tm_shape(region_sf) +
+  tm_borders()
+tmap.tpr.1
+
+#### Testing Map (Region)
+
+
+tests$age_group4 <- paste(tests$age_group3)
+tests$age_group4[tests$age >0 & tests$age <=4] <- "0-4"
+tests$age_group4[tests$age >5 & tests$age <=10] <- "5-10"
+tests$age_group4[tests$age >11 & tests$age <=13] <- "11-13"
+tests$age_group4[tests$age >14 & tests$age <=17] <- "14-17"
+
+
+region.tests <- aggregate(tests$total_specs, by = list(tests$covid_region,tests$age_group3,tests$race,tests$date),FUN=sum)
+colnames(region.tests) <- c("covid_region","age","race","date","total_tests")
+region.pos <- aggregate(tests$positive_specs, by = list(tests$covid_region,tests$age_group3,tests$race,tests$date),FUN=sum)
+colnames(region.pos) <- c("covid_region","age","race","date","positive_tests")
+region.tests <- merge(region.tests,region.pos, by=c("covid_region","age","race","date"),all=T)
+
+region.tests <- subset(region.tests, region.tests$date >= "2021-03-01")
+region.tests$date <- as.Date(region.tests$date,format="%Y-%m-%d")
+region.tests$rolling_total <- NA
+region.tests$rolling_positive <- NA
+for(i in 1:nrow(region.tests))
+{
+  c <- region.tests$covid_region[i]
+  d <- region.tests$date[i]
+  a <- region.tests$age[i]
+  r <- region.tests$race[i]
+  
+  hub <- subset(region.tests, region.tests$age==a & region.tests$race == r & region.tests$covid_region==c & region.tests$date %in% seq.Date(d-6,d,1))
+  region.tests$rolling_total[i] <- mean(hub$total_tests,na.rm=T)
+  region.tests$rolling_positive[i] <- mean(hub$positive_tests,na.rm=T)
+}
+
+region.tests$rolling_tpr <- region.tests$rolling_positive/region.tests$rolling_total
+#region.tests$region <- toupper(paste(region.tests$covid_region))
+
+#ggplot(region.tests[region.tests$age=="Under 10",],aes(x=date,y=rolling_tpr,color=race)) +
+  #geom_line() +
+  #facet_wrap(race~covid_region,scales="free_y",ncol=2)
+
+region_sf <- file.choose()
+region_sf <- st_read(region_sf)
+
+region_map <- merge(y=region.tests,x=region_sf,by.y="covid_region",by.x="new_restor",all=F)
+
+p <- region_map[region_map$race %in% c("Hispanic","Black or African American","White") & region_map$age %in% c("Under 10","11-17"),]
+
+rmap.tpr.1 <- tm_shape(p) + 
+   tm_polygons(col = "rolling_tpr", style="cont",border.alpha=1, colorNA ="gray",textNA = "No Data") +
+  tm_layout(legend.outside = T,legend.outside.position="right" , legend.text.size = 0.9, ) +
+  tm_facets(along = "date", by=c("age","race"), free.coords = F) +
+  tm_shape(region_sf) +
+  tm_borders()
+rmap.tpr.1
+tmap_animation(rmap.tpr.1, delay=40)
+```
+
+## Supplemental Figure - Cases With(out) Race
+
+```{r,eval=F}
+with.race <- subset(tested,tested$race_eth != "Unknown")
+without.race <- subset(tested,tested$race_eth == "Unknown")
+
+tested$has_race <- tested$race_eth != "Unknown"
+tested$majority <- NA
+for(i in unique(na.omit(tested$patient_home_zip)))
+{
+  maj <- merged_IL_cases$majority[merged_IL_cases$GEOID10==i]
+  if(length(maj)>0){tested$majority[tested$patient_home_zip==i] <- maj}
+}
+
+age.dist <- tested %>% group_by(age_group,has_race) %>% tally
+colnames(age.dist) <- c("age","has_race","cases")
+zip.dist <- tested %>% group_by(majority,has_race) %>% tally
+colnames(zip.dist) <- c("majority","has_race","cases")
+zip.dist <- subset(zip.dist,zip.dist$majority != "Other")
+
+age.dist$age <- factor(age.dist$age,levels=age_key[8:1])
+ggplot(age.dist[!is.na(age.dist$age),],aes(x=has_race,y=cases,fill=age)) + 
+  geom_bar(stat="identity",position="fill") +
+  scale_fill_brewer(palette = "PuBu", direction=-1) +
+  xlab("Race/Ethnicity Known") + ylab("% of Cases") + labs(fill="Age") +
+  theme(panel.grid.major.y = element_line(), panel.grid.minor.y = element_line())
+
+ggplot(zip.dist[zip.dist$majority!="Other",],aes(x=has_race,y=cases,fill=majority)) + 
+  geom_bar(stat="identity",position="fill") +
+  scale_fill_manual(values=wespal[c(3,2,9,1)]) +
+  xlab("Race/Ethnicity Known") + ylab("% of Cases") + labs(fill="Majority Race of Zip") +
+  theme(panel.grid.major.y = element_line(), panel.grid.minor.y = element_line())
+
+```
+
+```{r}
+cumulative.deaths <- data.frame(table(cases$age_group[cases$died_from_disease=="Yes"], cases$race_eth[cases$died_from_disease=="Yes"]))
+
+colnames(cumulative.deaths) <- c("age_group","race_eth","n_deaths")
+
+pop.age.race <- aggregate(IL_age_race$POPESTIMATE2019, by=list(IL_age_race$race_eth,IL_age_race$age_group), FUN=sum)
+colnames(pop.age.race) <- c("race_eth","age_group","population")
+
+cmd <- merge(cumulative.deaths,pop.age.race, by = c("race_eth","age_group"))
+
+cmd$cum.p.death <- cmd$n_deaths/cmd$population*100
+```
+
+
